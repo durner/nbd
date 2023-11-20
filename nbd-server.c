@@ -1706,7 +1706,13 @@ int expwrite_zeroes(struct nbd_request* req, CLIENT* client, int fua) {
 	size_t len = req->len;
 	size_t maxsize = 64LL*1024LL*1024LL;
 	/* use calloc() as sadly MAP_ANON is apparently not POSIX standard */
-	char *buf = calloc (1, maxsize);
+
+    // Use `posix_memalign` to make sure O_DIRECT works properly.
+	char *buf;
+	if(posix_memalign((void **) &buf, 512, maxsize) != 0) {
+		err("Could not allocate memory for request");
+	}
+	memset(buf, 0, maxsize);
 	int ret;
 	while (len > 0) {
 		size_t l = len;
@@ -2049,7 +2055,7 @@ bool setupexport(CLIENT* client) {
 				cancreate = 0;
 			/* if expected_size is specified, and this is the first file, we can create the file */
 			mode_t mode = (client->server->flags & F_READONLY) ?
-			  O_RDONLY : (O_RDWR | (cancreate?O_CREAT:0));
+			  O_RDONLY : (O_RDWR | (cancreate?O_CREAT:0) | O_DIRECT);
 
 			if (temporary) {
 				tmpname=g_strdup_printf("%s.%d-XXXXXX", client->exportname, i);
@@ -2065,7 +2071,7 @@ bool setupexport(CLIENT* client) {
 				fi.fhandle = open(tmpname, mode, 0600);
 				if(fi.fhandle == -1 && mode == O_RDWR) {
 					/* Try again because maybe media was read-only */
-					fi.fhandle = open(tmpname, O_RDONLY);
+					fi.fhandle = open(tmpname, O_RDONLY | O_DIRECT);
 					if(fi.fhandle != -1) {
 						/* Opening the base file in copyonwrite mode is
 						 * okay */
@@ -2820,10 +2826,18 @@ struct work_package* package_create(CLIENT* client, struct nbd_request* req) {
 
 	if((req->type & NBD_CMD_MASK_COMMAND) == NBD_CMD_WRITE) {
 		if (client->server->flags & F_SPLICE) {
-			if (mkpipe(rv->pipefd, req->len))
-				rv->data = malloc(req->len);
+		    if (mkpipe(rv->pipefd, req->len)) {
+			    // Use `posix_memalign` to make sure O_DIRECT works properly.
+			    if(posix_memalign(&rv->data, 512, req->len) != 0) {
+					err("Could not allocate memory for request");
+				}
+			}
+
 		} else {
-			rv->data = malloc(req->len);
+			// Use `posix_memalign` to make sure O_DIRECT works properly.
+			if(posix_memalign(&rv->data, 512, req->len) != 0) {
+				err("Could not allocate memory for request");
+			}
 		}
 	}
 
@@ -2891,8 +2905,8 @@ static void handle_normal_read(CLIENT *client, struct nbd_request *req)
 		return;
 	}
 	if(ctx->df || !(ctx->is_structured)) {
-		ctx->buf = malloc(req->len);
-		if(!(ctx->buf)) {
+        // Use `posix_memalign` to make sure O_DIRECT works properly.
+        if(posix_memalign(&ctx->buf, 512, req->len)) {
 			err("Could not allocate memory for request");
 		}
 		ctx->buflen = req->len;
